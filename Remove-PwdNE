@@ -1,0 +1,129 @@
+<#
+.Synopsis
+   Removes the 'Password Never Expires' and 'User Cannot Change Password' from a users AD account and informs them via email.
+.DESCRIPTION
+   Specify a user/list of users, SMTP, and sender address.
+   Module queries AD for the user account, specifically the properties required. Attribute for the password change date is set to 0, then subtracted to give the current date. This ensures that the account is not locked out immediately after the expiry is removed.
+   Upon completion, Send-MailMessage module emails the user to let them know it has been removed.
+.EXAMPLE
+   Remove-PwdNE -User John -SenderAddress no-reply@contoso.com -SMTPServerIP 10.20.30.40
+
+   The above example will remove the password never expires option for a single user with the account name 'John' and then send an email to inform them.
+.EXAMPLE
+   Remove-PwdNE -UserListFilePath .\Documents\Userlist.txt -SenderAddress no-reply@contoso.com -SMTPServerIP 10.20.30.40
+
+   The above example will import a list of users from a text file located in the users documents folder, then sequentially work through the list processing each user.
+   This will send an email to the end-user, just like in single-mode.
+.INPUTS
+   -User             - username for the account that needs updated
+   -UserListFilePath - location of a file to import a batch of users to process
+   -SenderAddress    - address from which the automailer will send as
+   -SMTPServerIP     - IP address of an authorised SMTP service to allow sending emails
+   -MsgSubject       - Override the default subject field in the automatic email
+   -MsgBody          - Override the default body of text in the automatic email
+.OUTPUTS
+   Failed items are reported in the console window, in addition to being appended to a text file "FailedAccountChanges.txt" in the default filepath.
+.NOTES
+   Must have Active Directory Powershell module loaded. Install Remote Server Adminstration Tools and load the module by entering: Import-Module ActiveDirectory
+.ROLE
+   Domain account administration, Active Directory, Security
+.FUNCTIONALITY
+   Removal of password never expires from domain accounts.
+#>
+Function Remove-PwdNE {
+[CmdletBinding(DefaultParametersetName="Single")]
+Param(
+[Parameter(ParameterSetName="Single", Position=0)][AllowEmptyString()][String]
+$User="",
+[Parameter(ParameterSetName="Multi", Position=0)][AllowEmptyString()][String]
+$UserListFilePath="",
+[Parameter(Mandatory=$true)][String]
+$SMTPServerIP="",
+[Parameter(Mandatory=$true)][String]
+$SenderAddress="",
+[String]$MsgSubject = "IMPORTANT: Password Expiry",
+[Array]$MsgBody = @"
+ 
+
+Your domain account has been updated and the password will now expire in accordance with the standard company policy of every 28 days.
+Please note, this is a mandatory security change for all staff and you will be required to set your password before the above period elapses each month.
+Failure to do so will result in your account being automatically locked out of the system, preventing you from logging in.
+Please note that you must also update the new password in any other devices that have the password saved, or they will fail to authenticate.
+
+Thank you for your co-operation,
+IT Support
+"@
+
+)
+Begin {
+
+[Int]$FailCount ="0"
+
+Function ADUserPWExpiry ($User) {
+    $User = Get-ADUser $User -Properties pwdLastSet, PasswordNeverExpires, CannotChangePassword, mail -ErrorAction Stop
+    $User.pwdLastSet = 0
+    Set-ADUser -Instance $User
+    $User.pwdLastSet = -1
+    Set-ADUser -instance $User
+    $User.PasswordNeverExpires = $False
+    $User.CannotChangePassword = $False
+    Set-ADUser -instance $User
+    Return $User }
+
+Switch ($PsCmdlet.ParameterSetName) {
+      "Single"  {
+            Write-Host "Intialising for mode: Single User"
+            }
+      "Multi" {
+            Write-Host "Intialising for mode: Multi User"
+            $Users = Get-Content -Path $UserListFilePath
+            }
+        }
+    }
+        
+Process{
+    Switch ($PsCmdlet.ParameterSetName) {
+        "Single" {
+
+            Try {
+                $Account = ADUserPWExpiry -User $User -ErrorAction Stop
+                $FullName = $Account.Name
+                Send-MailMessage -To $Account.Mail -From $SenderAddress -Bcc $SenderAddress -Subject $MsgSubject -SmtpServer $SMTPServerIP -Priority High -Body "Hello $FullName, $MsgBody" -ErrorAction Stop
+            }
+            Catch{
+                $FailCount =$FailCount +1
+                Write-Host "Failed to update account for $User."
+                $User | Out-File -FilePath .\FailedAccountChanges.txt -Append
+                $Error[0] | Out-File -FilePath .\FailedAccountChanges.txt -Append
+            }
+            Finally{
+                Write-Warning "Account for $FullName has been updated."
+            }
+        }
+
+        "Multi" {
+
+            Foreach ($User in $Users) {
+                Try {
+                    $Account = ADUserPWExpiry -User $User -ErrorAction Stop
+                    $FullName = $Account.Name
+                    Send-MailMessage -To $Account.Mail -From $SenderAddress -Bcc $SenderAddress -Subject $MsgSubject -SmtpServer $SMTPServerIP -Priority High -Body "Hello $FullName, $MsgBody" -ErrorAction Stop
+                    }
+            
+                Catch{
+                    $FailCount =$FailCount +1
+                    Write-Host "Failed to update account for $User." -BackgroundColor White -ForegroundColor Red
+                    $User | Out-File -FilePath .\FailedAccountChanges.txt -Append
+                    $Error[0] | Out-File -FilePath .\FailedAccountChanges.txt -Append
+                    Continue
+                    }
+                Finally{
+                    Write-Host "$User account updated."
+                }
+        
+            }
+        }
+    }
+}
+End{ Write-Warning "Job complete. Failed objects: $FailCount" }
+}
